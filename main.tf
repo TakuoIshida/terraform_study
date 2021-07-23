@@ -184,6 +184,27 @@ resource "aws_route" "nat_gateway_route" {
 
 # セキュリティグループの作り方
 resource "aws_security_group" "example_security_group" {
-  name = join("-", [local.project_name, ])
-
+  name   = join("-", [local.project_name, "scg"])
+  vpc_id = aws_vpc.example.id
 }
+
+# ingress: 80ポートでリクエストを全て許可する場合
+resource "aws_security_group_rule" "ingress_http_rule" {
+  type              = "ingress"
+  from_port         = 80
+  to_port           = 80
+  protocol          = "tcp"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.example_security_group.id
+}
+
+# egress: 全ての通信を許可する場合
+resource "aws_security_group_rule" "egress_rule" {
+  type              = "egress"
+  from_port         = 0
+  to_port           = 0
+  protocol          = "-1"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.example_security_group.id
+}
+
