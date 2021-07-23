@@ -5,7 +5,7 @@
 *.tfstate
 *.tfstate.*
 
-# .tfvars files
+# .tfvars files クレデンシャル情報（AMIのID）
 *.tfvars
 
 #terraform
