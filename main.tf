@@ -1,10 +1,11 @@
 provider "aws" {
-  region = "ap-northeast-1"
+  region = local.region
 }
 
 locals {
   default_ami  = "ami-0c3fd0f5d33134a76"
-  project_name = "hoge"
+  project_name = "my-project"
+  region       = "ap-northeast-1"
   az_a         = "ap-northeast-1a"
   az_c         = "ap-northeast-1c"
 }
@@ -157,3 +158,32 @@ resource "aws_subnet" "private_1a" {
   }
 }
 
+resource "aws_eip" "for_natgateway" {
+  vpc = true
+  depends_on = [
+    aws_internet_gateway.igw
+  ]
+}
+
+resource "aws_nat_gateway" "exmple_gateway" {
+  allocation_id = aws_eip.for_natgateway.id
+  subnet_id     = aws_subnet.public_1a.id
+  # internet gatewayが作成されてからNATGatewayの作成を実行する。依存関係の定義。
+  depends_on = [
+    aws_internet_gateway.igw
+  ]
+}
+
+resource "aws_route" "nat_gateway_route" {
+  route_table_id         = aws_route_table.private.id
+  nat_gateway_id         = aws_nat_gateway.exmple_gateway.id
+  destination_cidr_block = "0.0.0.0/0"
+
+}
+
+
+# セキュリティグループの作り方
+resource "aws_security_group" "example_security_group" {
+  name = join("-", [local.project_name, ])
+
+}
