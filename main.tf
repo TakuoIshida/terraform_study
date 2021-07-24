@@ -399,6 +399,7 @@ resource "aws_ecs_task_definition" "example_task" {
   # essential: タスク実行に必須かどうか？
   # image: 使用するコンテナImage
   # portMappings: マッピングするコンテナーのポート番号
+  execution_role_arn = module.ecs_task_execution_role.iam_role_arn
 }
 
 # ECSサービス
@@ -434,3 +435,30 @@ resource "aws_ecs_service" "example_service" {
   }
 }
 
+# Cloudwatch Logs (for nginx container)
+resource "aws_cloudwatch_log_group" "for_ecs" {
+  name              = "/ecs/example"
+  retention_in_days = 180 //logの保持日数
+}
+
+data "aws_iam_policy" "ecs_task_execution_role_policy" {
+  arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+data "aws_iam_policy_document" "ecs_task_excution" {
+  source_json = data.aws_iam_policy.ecs_task_execution_role_policy.policy //既存のポリシーを継承する
+
+  statement {
+    effect    = "Allow"
+    actions   = ["ssm:GetParameters", "kms:Decrypt"]
+    resources = ["*"]
+  }
+}
+
+# ECSタスク実行IAMRoleの定義
+module "ecs_task_execution_role" {
+  source     = "./iam_role/"
+  name       = "ecs-task-execution"
+  identifier = "ecs-tasks.amazonaws.com"
+  policy     = data.aws_iam_policy_document.ecs_task_excution.json
+}
