@@ -242,6 +242,15 @@ module "nginx_sg" {
   cidr_blocks = [aws_vpc.example.cidr_block]
 }
 
+module "mysql_sg" {
+  source      = "./net_work/"
+  name        = "mysql-sg"
+  port        = 3306
+  environment = local.env
+  vpc_id      = aws_vpc.example.id
+  cidr_blocks = [aws_vpc.example.cidr_block]
+}
+
 resource "aws_lb" "example_alb" {
   name                       = local.project_name
   load_balancer_type         = "application"
@@ -461,4 +470,203 @@ module "ecs_task_execution_role" {
   name       = "ecs-task-execution"
   identifier = "ecs-tasks.amazonaws.com"
   policy     = data.aws_iam_policy_document.ecs_task_excution.json
+}
+
+# 10章 Batch（TODO）
+
+#11章
+resource "aws_kms_key" "example_kms" {
+  description             = "CMK"
+  enable_key_rotation     = true
+  is_enabled              = true
+  deletion_window_in_days = 30 //削除待機期間（7~30d）：この間は、削除を取り消せる。削除は非推奨。enableをfalseにすること。
+}
+
+resource "aws_kms_alias" "example_alias" {
+  name          = "alias/example" //alias: KMSのUUIDだと見た目がわかりづらいため使用するショーカット。 「alias/hogehoge」の形で使用する
+  target_key_id = aws_kms_key.example_kms.key_id
+}
+
+# 12章 設定管理 SSM： パラメータストア。コンテナ、データベースのユーザー・Passなど環境ごとの設定を平文・暗号保存するサービス（TODO）
+
+#13章 データストア（RDS, Elasticache)
+# RDS
+resource "aws_db_parameter_group" "example_db_param" {
+  name   = "example"
+  family = "mysql5.7"
+  parameter {
+    name  = "character_set_database"
+    value = "utf8mb4"
+  }
+  parameter {
+    name  = "character_set_server"
+    value = "utf8mb4"
+  }
+}
+
+resource "aws_db_option_group" "example_db_option" {
+  name                 = "example"
+  engine_name          = "mysql"
+  major_engine_version = "5.7"
+
+  option {
+    option_name = "MARIADB_AUDIT_PLUGIN"
+  }
+}
+
+resource "aws_db_subnet_group" "example_db" {
+  name = "example_db"
+  subnet_ids = [
+    aws_subnet.private_1a.id,
+    aws_subnet.private_1c.id
+  ]
+}
+
+# RDS インスタンスの定義
+resource "aws_db_instance" "example_db_instance" {
+  identifier                 = "example" //dbのエンドポイントに使用する識別子
+  engine                     = "mysql"
+  engine_version             = "5.7.25"
+  instance_class             = "db.t3.small"
+  allocated_storage          = 20
+  max_allocated_storage      = 50
+  storage_type               = "gp2" //gp2:汎用SSD。その他、provisionedIOPS。
+  storage_encrypted          = true
+  kms_key_id                 = aws_kms_alias.example_alias.arn
+  username                   = "admin"
+  password                   = "VeryStrongPass!"
+  multi_az                   = true
+  publicly_accessible        = false
+  backup_window              = "09:10-09:40"
+  backup_retention_period    = 30
+  maintenance_window         = "mon:10:10-mon:10:40"
+  auto_minor_version_upgrade = false
+  deletion_protection        = false
+  skip_final_snapshot        = false
+  port                       = 3306
+  apply_immediately          = false
+
+  vpc_security_group_ids = [module.mysql_sg.security_group_id]
+  parameter_group_name   = aws_db_parameter_group.example_db_param.name
+  option_group_name      = aws_db_parameter_group.example_db_param.name
+  db_subnet_group_name   = aws_db_subnet_group.example_db.name
+
+  lifecycle {
+    ignore_changes = [password]
+  }
+  depends_on = [
+    aws_kms_key.example_kms
+  ]
+}
+
+# Elasticache(TODO)
+
+# 14章 デプロイメントパイプライン
+data "aws_iam_policy_document" "codebuild" {
+  statement {
+    effect    = "Allow"
+    resources = ["*"]
+    actions = [
+      "s3:PutObject",
+      "s3:GetObject",
+      "s3:GetObjectVersion",
+      "logs:CreateLogGroup",
+      "logs:CreateLogStream",
+      "logs:PutLogEvents",
+      "ecr:GetAuthorizationToken",
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:GetDwonloadUrlForlayer",
+      "ecr:GetRepositoryPolicy",
+      "ecr:DescribeRepositories",
+      "ecr:ListImages",
+      "ecr:DescribeImages",
+      "ecr:BatchGetImage",
+      "ecr:InitiateLayerUpload",
+      "ecr:UploadLayerPart",
+      "ecr:CompleteLayerUpload",
+      "ecr:PutImage",
+    ]
+  }
+}
+
+module "codebuild_role" {
+  source     = "./iam_role/"
+  name       = "codebuild"
+  identifier = "codebuild.amazonaws.com"
+  policy     = data.aws_iam_policy_document.codebuild.json
+}
+
+resource "aws_codebuild_project" "example_pj" {
+  name         = "example"
+  service_role = module.codebuild_role.iam_role_arn //iam_role_arnだけ補完が効かない
+
+  source {
+    type = "CODEPIPELINE"
+  }
+  artifacts {
+    type = "CODEPIPELINE"
+  }
+  environment {
+    type            = "LINUX_CONTAINER"
+    compute_type    = "BUILD_GENERAL1_SMALL"
+    image           = "aws/codebuild/standard:2.0" //AWS が用意するUbuntuベースImage
+    privileged_mode = true                         //optional: build時にDockerを使うかどうか？default: false
+
+    environment_variable {
+      name  = "SOME_KEY1"
+      value = "SOME_VALUE1"
+    }
+    environment_variable {
+      name  = "SOME_KEY2"
+      value = "SOME_VALUE2"
+    }
+  }
+}
+
+# codepipelineのサービスロール
+# ステージ間でデータを受け渡すためのS3操作権限
+# CodeBuild操作権限
+# ECSにDocker ImageをデプロイするためのECS操作権限
+# CodeBuild や ECS にロールを渡すためのPassRole 権限
+
+data "aws_iam_policy_document" "codepipeline" {
+  statement {
+    effect    = "Allow"
+    resources = ["*"]
+    actions = [
+      "s3:PutObject",
+      "s3:GetObject",
+      "s3:GetObjectVersion",
+      "s3:GetBucketVersioning",
+      "codebuild:BatchGetBuilds",
+      "codebuild:StartBuild",
+      "ecs:DescribeServices",
+      "ecs:DescribeTaskDefinition",
+      "ecs:DescribeTasks",
+      "ecs:ListTasks",
+      "ecs:RegisterTaskDefinition",
+      "ecs:UpdateService",
+      "iam:PassRole",
+    ]
+  }
+}
+
+module "coepipeline_role" {
+  source     = "./iam_role/"
+  name       = "codepipeline"
+  identifier = "codepipeline.amazonaws.com"
+  policy     = data.aws_iam_policy_document.codepipeline.json
+}
+
+# artifact store(Codepipelineの各ステージデータの受け渡しに使用するバケット)
+resource "aws_s3_bucket" "artifact" {
+  bucket = "artifact-terraform-bucket"
+
+  lifecycle_rule {
+    enabled = true
+    expiration {
+      days = 90
+    }
+  }
+
 }
