@@ -54,18 +54,18 @@ locals {
 # }
 
 # S3 の Log bucket
-# resource "aws_s3_bucket" "logging_bucket" {
-#   bucket = "my-terraform-lesson-logging"
-#   # 中が空でなくても破棄できるようにする場合
-#   # force_destroy = true 
-#   lifecycle_rule {
-#     enabled = true
-#     expiration {
-#       days = 180
-#     }
-#   }
+resource "aws_s3_bucket" "logging_bucket" {
+  bucket = "my-terraform-lesson-logging"
+  # 中が空でなくても破棄できるようにする場合
+  # force_destroy = true 
+  lifecycle_rule {
+    enabled = true
+    expiration {
+      days = 180
+    }
+  }
 
-# }
+}
 
 # resource "aws_s3_bucket_policy" "alb_log" {
 #   bucket = aws_s3_bucket.logging_bucket.id
@@ -84,127 +84,140 @@ locals {
 #   }
 # }
 
-#7 章 ネットワーク
+# 8章 ALBとDNS
+module "net_work" {
+  source = "./net_work/"
+  name   = "module-sg"
+}
 
-resource "aws_vpc" "example" {
-  cidr_block           = "192.168.0.0/16"
-  enable_dns_hostnames = true
-  enable_dns_support   = true
-  tags = {
-    "Name" = "hogehoge_tag" //nameはリソース名にも表示されるのであると見やすい
+resource "aws_lb" "example_alb" {
+  name                       = local.project_name
+  load_balancer_type         = "application"
+  internal                   = false //internetに公開する場合
+  idle_timeout               = 60    //default: 60s
+  enable_deletion_protection = true  //削除保護（本番の時に有効化する）
+  access_logs {
+    bucket  = aws_s3_bucket.logging_bucket.id
+    enabled = true
+  }
+  security_groups = [] //TODO: SGのmodule化
+}
+
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.example_alb.arn
+  port              = 80
+  protocol          = "http"
+
+  default_action {
+    type = "fixed-response"
+
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "This is HTTP"
+      status_code  = 200
+    }
   }
 }
 
-resource "aws_subnet" "public_1a" {
-  vpc_id                  = aws_vpc.example.id
-  cidr_block              = "192.168.1.0/24"
-  map_public_ip_on_launch = true
-  availability_zone       = local.az_a
-  tags = {
-    "Name" = join("-", [local.az_a, "public_1a"])
+output "alb_dns_name" {
+  value = aws_lb.example_alb.dns_name
+}
+
+# DNS レコード
+resource "aws_route53_zone" "example_zone" {
+  name = "test.example.com"
+}
+
+resource "aws_route53_record" "example_record" {
+  zone_id = aws_route53_zone.example_zone.id
+  name    = aws_route53_zone.example_zone.name
+  type    = "A"
+
+  alias {
+    name                   = aws_lb.example_alb.dns_name
+    zone_id                = aws_lb.example_alb.zone_id
+    evaluate_target_health = true
   }
 }
 
-resource "aws_subnet" "public_1c" {
-  vpc_id                  = aws_vpc.example.id
-  cidr_block              = "192.168.2.0/24"
-  map_public_ip_on_launch = true
-  availability_zone       = local.az_c
-  tags = {
-    "Name" = join("-", [local.az_c, "public_1c"])
+# ACM
+resource "aws_acm_certificate" "example_acm" {
+  domain_name               = aws_route53_record.example_record.name
+  subject_alternative_names = [] //domain名の追加 P69 example.com , test.example.com
+  validation_method         = "DNS"
+  lifecycle {
+    create_before_destroy = true //新しいSSL証明書を作成してから、古い証明書を差し替える。defaultはfalse。terraform独自仕様。
   }
 }
 
-resource "aws_internet_gateway" "igw" {
-  vpc_id = aws_vpc.example.id
+# 検証用 DNSレコード
+resource "aws_route53_record" "example_certificate" {
+  name    = aws_acm_certificate.example_acm.domain_validation_options[0].resource_record_name
+  type    = aws_acm_certificate.example_acm.domain_validation_options[0].resource_record_type
+  records = [aws_acm_certificate.example_acm.domain_validation_options[0].resource_record_value]
+  zone_id = aws_route53_zone.example_zone.id
+  ttl     = 60 //Time To Live: 有効寿命
 }
 
-resource "aws_route_table" "public_rt" {
-  vpc_id = aws_vpc.example.id
+resource "aws_acm_certificate_validation" "example_validation" {
+  certificate_arn         = aws_acm_certificate.example_acm.arn
+  validation_record_fqdns = [aws_route53_record.example_certificate.fdqn]
 }
 
-resource "aws_route" "public" {
-  route_table_id         = aws_route_table.public_rt.id
-  gateway_id             = aws_internet_gateway.igw.id
-  destination_cidr_block = "0.0.0.0/0"
-}
-
-resource "aws_route_table" "private" {
-  vpc_id = aws_vpc.example.id
-}
-
-resource "aws_route_table_association" "private" {
-  subnet_id      = aws_subnet.private_1a.id
-  route_table_id = aws_route_table.private.id
-}
-
-resource "aws_route_table_association" "public_1a" {
-  subnet_id      = aws_subnet.public_1a.id
-  route_table_id = aws_route_table.public_rt.id
-}
-
-resource "aws_route_table_association" "public_1c" {
-  subnet_id      = aws_subnet.public_1c.id
-  route_table_id = aws_route_table.public_rt.id
-}
-
-resource "aws_subnet" "private_1a" {
-  vpc_id                  = aws_vpc.example.id
-  cidr_block              = "192.168.3.0/24"
-  availability_zone       = local.az_a
-  map_public_ip_on_launch = false
-  tags = {
-    "Name" = join("-", [local.az_a, "private_1a"])
+# HTTPS用ロードバランサー
+resource "aws_lb_listener" "https" {
+  load_balancer_arn = aws_lb.example_alb.arn
+  port              = 443
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-2016-08"
+  default_action {
+    type = "fixed-response"
+    fixed_response {
+      content_type = "text/plain"
+      message_body = "hello"
+      status_code  = 200
+    }
   }
 }
 
-resource "aws_eip" "for_natgateway" {
-  vpc = true
+# target group
+resource "aws_lb_target_group" "example_target" {
+  name        = join("-", [local.project_name, "target_group"])
+  target_type = "ip"
+  # vpc_id = vpc.id
+  port                 = 80
+  protocol             = "HTTP"
+  deregistration_delay = 300 //ターゲットの登録を解除する前に、ALBが待機する時間。デフォルト：300s
+  health_check {
+    path                = "/"
+    healthy_threshold   = 5
+    unhealthy_threshold = 2
+    timeout             = 5
+    interval            = 30
+    matcher             = 200            //正常判定に使用するためのステータスコード
+    port                = "traffic-port" //ヘルスチェックで使用するPORT
+    protocol            = "HTTP"
+  }
+  # albが作成されてから、ターゲットグループを定義する（依存関係）
   depends_on = [
-    aws_internet_gateway.igw
+    aws_lb.example_alb
   ]
 }
 
-resource "aws_nat_gateway" "exmple_gateway" {
-  allocation_id = aws_eip.for_natgateway.id
-  subnet_id     = aws_subnet.public_1a.id
-  # internet gatewayが作成されてからNATGatewayの作成を実行する。依存関係の定義。
-  depends_on = [
-    aws_internet_gateway.igw
-  ]
+# リスナールール
+resource "aws_lb_listener_rule" "example_listner_rule" {
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 100 //小さいほど優先度高い
+
+  # フォワード先のターゲットグループの設定
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.example_target.arn
+  }
+
+  # パスベースのルール
+  condition {
+    field  = "path-pattern"
+    values = ["/*"] //すべてのPathにマッチする
+  }
 }
-
-resource "aws_route" "nat_gateway_route" {
-  route_table_id         = aws_route_table.private.id
-  nat_gateway_id         = aws_nat_gateway.exmple_gateway.id
-  destination_cidr_block = "0.0.0.0/0"
-
-}
-
-
-# セキュリティグループの作り方
-resource "aws_security_group" "example_security_group" {
-  name   = join("-", [local.project_name, "scg"])
-  vpc_id = aws_vpc.example.id
-}
-
-# ingress: 80ポートでリクエストを全て許可する場合
-resource "aws_security_group_rule" "ingress_http_rule" {
-  type              = "ingress"
-  from_port         = 80
-  to_port           = 80
-  protocol          = "tcp"
-  cidr_blocks       = ["0.0.0.0/0"]
-  security_group_id = aws_security_group.example_security_group.id
-}
-
-# egress: 全ての通信を許可する場合
-resource "aws_security_group_rule" "egress_rule" {
-  type              = "egress"
-  from_port         = 0
-  to_port           = 0
-  protocol          = "-1"
-  cidr_blocks       = ["0.0.0.0/0"]
-  security_group_id = aws_security_group.example_security_group.id
-}
-
